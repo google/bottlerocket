@@ -1,0 +1,3 @@
+[submodule "third_party/rocket-chip"]
+	path = third_party/rocket-chip
+	url = https://github.com/freechipsproject/rocket-chip

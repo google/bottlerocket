@@ -1,0 +1,32 @@
+# Temporary files
+*~
+*#
+
+# File extensions
+*.swp
+*.objdump
+*.o
+*.svwf
+*.dump
+*.log
+*.elf
+*.hex
+*.trn
+*.dsn
+test/*.d
+test/*.ld
+test/*.addrs
+
+# Directories
+/generated-src/
+/path-check-output/
+/lib/
+/target/
+/project/target/
+/test/target/
+*.simvision/
+*/INCA_libs/
+*/ncverilog.history
+
+# Specific files
+.addons-dont-touch
