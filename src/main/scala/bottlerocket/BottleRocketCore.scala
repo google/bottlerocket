@@ -22,35 +22,42 @@ import chisel3.core.withClock
 import freechips.rocketchip._
 import rocket._
 import devices.debug.DMIIO
-import amba.axi4.{AXI4Bundle, AXI4Parameters}
 import Params._
 
 class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extends Module {
   val io = IO(new Bundle {
     val constclk = Input(Clock())
-    val iBus = AXI4LiteBundle(axiParams)
-    val dBus = AXI4LiteBundle(axiParams)
+    val iBus_gclk = Input(Clock())
+    val iBus = new GBX
+    val dBus = new GBX
+    val sBus = new GBX
+    val localBus = new GBX
     val nmi = Input(Bool())
-    val eip = Input(Bool())
+    val interruptLines = Input(UInt(width = options.nProgInterrupts.W))
     val dmi = Flipped(new DMIIO()(p))
     val wfisleep = Output(Bool())
     val traceInst = Output(UInt(width = xBitwidth))
     val traceRetire = Output(Bool())
     val traceInterrupt = Output(Bool())
     val traceEret = Output(Bool())
-    val rvfi = new RVFI
   })
 
   /********************
    * MAJOR SUBMODULES *
    ********************/
 
+  val fetchPMP = Module(new PMPChecker(2)) // 2^2 Bytes
+  val accessPMP = Module(new PMPChecker(2)) // 2^2 Bytes
   val fetchMgr = Module(new FrontendBuffer(options))
   val regfile = new RegfileWithZero(nRegisters, xBitwidth)
   val alu = Module(new ALU())
+  val gbxRouter = Module(new GBXRouter(nMasters=2, nSlaves=4, nOutstanding=4))
   val debug = Module(new DebugModuleFSM())
   val csrfile = Module(new CSRFile())
   val breakpoints = Module(new BreakpointUnit(csrfile.nBreakpoints))
+  val intController = Module(new GBXInterruptController(options.nProgInterrupts))
+  intController.io.constclk := io.constclk
+  intController.io.lines := io.interruptLines
 
   /***************
    * WFISLEEP FF *
@@ -60,7 +67,10 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   val s_ready :: s_sleeping :: s_waking :: Nil = chisel3.util.Enum(UInt(), 3)
   val sleepstate = withClock(io.constclk) { Reg(init = s_ready) }
 
-  fetchMgr.io.sleeping := sleepstate =/= s_ready
+  // This sticky bit tracks whether gclk has been reactivated since the last WFI sleep
+  val memClockActive = withClock(io.iBus_gclk) { Reg(init = Bool(false)) }
+  fetchMgr.io.gclk := io.iBus_gclk
+  fetchMgr.io.sleeping := !(memClockActive && sleepstate === s_ready)
   io.wfisleep := sleepstate === s_sleeping && !fetchMgr.io.outstanding
 
   when (sleepstate === s_ready) {
@@ -68,13 +78,19 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
       sleepstate := s_sleeping
     }
   } .elsewhen (sleepstate === s_sleeping) {
-    when (io.eip) {
+    when (intController.io.eip) {
       sleepstate := s_waking
     }
   } .otherwise {
     when (!csrfile.io.csr_stall) {
       sleepstate := s_ready
     }
+  }
+
+  when (sleepstate === s_sleeping) {
+    memClockActive := Bool(false)
+  } .otherwise {
+    memClockActive := Bool(true)
   }
 
   /******************************
@@ -149,14 +165,19 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   val exceptions_IF = Wire(new ExceptionCause)
   exceptions_IF := ExceptionCause.clear
 
+  fetchPMP.io.pmp <> csrfile.io.pmp
+  fetchPMP.io.prv := csrfile.io.status.prv // always consistent with prv of valid replies
+  fetchPMP.io.addr := PC_IF
+  fetchPMP.io.size := Mux(rvc_IF, UInt(1), UInt(2)) // 2^1 or 2^2 bytes
+
   fetchMgr.io.req.enter_U_mode := csrfile.io.eret && !csrfile.io.status.debug &&
-  csrfile.io.status.mpp === UInt(PRV.U)
+    csrfile.io.status.mpp === UInt(PRV.U)
   fetchMgr.io.req.exit_U_mode := csrfile.io.exception && !(csrfile.io.cause === UInt(CSR.debugTriggerCause))
   fetchMgr.io.req.pc := nextPC
   fetchMgr.io.resp.ready := !stall_IF
-  io.iBus <> fetchMgr.io.bus
+  fetchMgr.io.bus <> io.iBus
 
-  val busWerr = io.dBus.b.valid && (io.dBus.b.bits.resp === AXI4Parameters.RESP_SLVERR || io.dBus.b.bits.resp === AXI4Parameters.RESP_DECERR)
+  val busWerr = gbxRouter.io.masters(0).grspvalid && gbxRouter.io.masters(0).grspwerr
   val werrExceptionTaken = exception_WB && csrfile.io.cause === UInt(Causes.store_access)
   when (busWerr) {
     impreciseStoreInterrupt := Bool(true)
@@ -167,7 +188,7 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   exceptions_IF.interrupt := csrfile.io.interrupt
   exceptions_IF.storeFault := impreciseStoreInterrupt
   exceptions_IF.misalignedFetch := fetchMgr.io.resp.valid && PC_IF(0)
-  exceptions_IF.illegalFetch := fetchMgr.io.resp.valid && fetchMgr.io.resp.bits.error
+  exceptions_IF.illegalFetch := fetchMgr.io.resp.valid && (fetchMgr.io.resp.bits.error || !fetchPMP.io.x)
 
   /************************
    * DECODE/EXECUTE STAGE *
@@ -242,13 +263,13 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   val memSize_EX = Wire(UInt())
   val wdata_EX = Wire(UInt(width = xBitwidth))
   when (ctrl_EX.mem_type === MT_B || ctrl_EX.mem_type === MT_BU) {
-    memSize_EX := UInt(1)
+    memSize_EX := UInt(0)
     wdata_EX := chisel3.util.Cat(Seq.fill(4){ rs2DataBypassed_EX(7,0) })
   } .elsewhen (ctrl_EX.mem_type === MT_H || ctrl_EX.mem_type === MT_HU) {
-    memSize_EX := UInt(2)
+    memSize_EX := UInt(1)
     wdata_EX := chisel3.util.Cat(Seq.fill(2){ rs2DataBypassed_EX(15,0) })
   } .otherwise {
-    memSize_EX := UInt(4)
+    memSize_EX := UInt(2)
     wdata_EX := rs2DataBypassed_EX
   }
 
@@ -258,7 +279,7 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   val illegalCSRWrite = csrfile.io.decode.write_illegal && csrAccess_EX && !csrRead_EX
   val illegalSystem = csrfile.io.decode.system_illegal && ((ctrl_EX.mem && ctrl_EX.mem_cmd === M_SFENCE) || (ctrl_EX.csr >= CSR.I))
   val illegalInst_EX = !ctrl_EX.legal || illegalExtension || illegalCSRAccess || illegalCSRWrite || illegalSystem
-  val misaligned_EX = (alu.io.adder_out & (memSize_EX - UInt(1))).orR
+  val misaligned_EX = (alu.io.adder_out & ((UInt(1, width = xBitwidth) << memSize_EX) - UInt(1))).orR
   val pcBreakpoint = breakpoints.io.xcpt_if
   val debugBreakpoint = breakpoints.io.debug_if
   val loadBreakpoint = isLoad_EX && breakpoints.io.xcpt_ld
@@ -273,29 +294,32 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   exceptions_EX.debugBreakpoint := debugBreakpoint || loadDebugBreakpoint || storeDebugBreakpoint
   exceptions_EX.loadMisaligned := misaligned_EX && isLoad_EX
   exceptions_EX.storeMisaligned := misaligned_EX && isStore_EX
+  exceptions_EX.loadFault := !accessPMP.io.r && isLoad_EX
+  exceptions_EX.storeFault := !accessPMP.io.w && isStore_EX
 
   // Do not access memory with an unhandled exception!
   val memEnMasked_EX = memEn_EX && !killMem_EX && !ExceptionCause.toBool(exceptions_EX)
-  val awSentWUnsent_EX = RegInit(Bool(false))
-  when (io.dBus.aw.fire && !io.dBus.w.fire) {
-    awSentWUnsent_EX := Bool(true)
-  } .elsewhen (io.dBus.w.fire && !io.dBus.aw.fire) {
-    awSentWUnsent_EX := Bool(false)
-  }
+  val coreBusPort = gbxRouter.io.masters(0)
+  val addrMap = Module(new(AddressMap))
+  addrMap.io.addr := gbxRouter.io.decoder.addr
+  gbxRouter.io.decoder.select := chisel3.util.MuxCase(UInt(0),
+    Seq(addrMap.io.sBus -> UInt(1), addrMap.io.intCtrlBus -> UInt(2), addrMap.io.localBus -> UInt(3)))
 
-  io.dBus.ar.valid := memEnMasked_EX && isLoad_EX
-  io.dBus.ar.bits.addr := alu.io.adder_out.asUInt
-  io.dBus.ar.bits.cache := AXI4Parameters.CACHE_BUFFERABLE
-  io.dBus.ar.bits.prot := Mux(csrfile.io.status.prv === UInt(PRV.M), AXI4Parameters.PROT_PRIVILEDGED, AXI4Parameters.PROT_INSECURE)
+  io.dBus <> gbxRouter.io.slaves(0)
+  io.sBus <> gbxRouter.io.slaves(1)
+  intController.io.bus <> gbxRouter.io.slaves(2)
+  io.localBus <> gbxRouter.io.slaves(3)
 
-  io.dBus.aw.valid := memEnMasked_EX && isStore_EX && !awSentWUnsent_EX
-  io.dBus.aw.bits.addr := alu.io.adder_out.asUInt
-  io.dBus.aw.bits.cache := AXI4Parameters.CACHE_BUFFERABLE
-  io.dBus.aw.bits.prot := Mux(csrfile.io.status.prv === UInt(PRV.M), AXI4Parameters.PROT_PRIVILEDGED, AXI4Parameters.PROT_INSECURE)
-
-  io.dBus.w.valid := memEnMasked_EX && isStore_EX
-  io.dBus.w.bits.data := wdata_EX
-  io.dBus.w.bits.strb := ((1.U << memSize_EX) - 1.U) << io.dBus.aw.bits.addr(1,0)
+  gbxRouter.io.masters(0).greqvalid := memEnMasked_EX
+  gbxRouter.io.masters(0).greqwrite := gbxRouter.io.masters(0).greqvalid && ctrl_EX.mem_cmd === M_XWR
+  gbxRouter.io.masters(0).greqaddr := alu.io.adder_out.asUInt
+  gbxRouter.io.masters(0).greqsize := memSize_EX
+  gbxRouter.io.masters(0).greqlen := UInt(0, width = busLenBitwidth)
+  gbxRouter.io.masters(0).greqdvalid := gbxRouter.io.masters(0).greqwrite
+  gbxRouter.io.masters(0).greqdata := wdata_EX
+  gbxRouter.io.masters(0).greqdlast := Bool(true)
+  gbxRouter.io.masters(0).grequser := UInt(0, width = busUserBitwidth)
+  gbxRouter.io.masters(0).greqid := Mux(csrfile.io.status.prv === UInt(PRV.M), UInt(2), UInt(0))
 
   // Multiplier/Divider
   val mulDivEnMasked_EX = !kill_EX && ctrl_EX.div
@@ -309,6 +333,11 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
 
   breakpoints.io.pc := PC_EX
   breakpoints.io.ea := alu.io.adder_out
+
+  accessPMP.io.pmp <> csrfile.io.pmp
+  accessPMP.io.prv := csrfile.io.status.prv
+  accessPMP.io.addr := alu.io.adder_out
+  accessPMP.io.size := memSize_EX
 
   /*******************
    * WRITEBACK STAGE *
@@ -342,16 +371,16 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   val exceptions_WB = Wire(new ExceptionCause)
   exceptions_WB := pastExceptions_WB
 
-  val busRerr = io.dBus.b.valid && (io.dBus.b.bits.resp === AXI4Parameters.RESP_SLVERR || io.dBus.b.bits.resp === AXI4Parameters.RESP_DECERR)
-  val pendingLoadError = memEn_WB && busRerr
+  val pendingLoadError = gbxRouter.io.masters(0).grsprerr && gbxRouter.io.masters(0).grspvalid && memEn_WB
 
   // Load errors are delayed a cycle by stalling the writeback stage to avoid bus-to-bus paths
   val delayedLoadError = RegNext(next = pendingLoadError, init = Bool(false))
-  exceptions_WB.loadFault := delayedLoadError
+  val busErrRespActive = gbxRouter.io.masters(0).grspvalid && (gbxRouter.io.masters(0).grsprerr || gbxRouter.io.masters(0).grspwerr)
+  val busErrAddr = RegEnable(next = gbxRouter.io.masters(0).grspdata, enable = busErrRespActive)
+  exceptions_WB.loadFault := pastExceptions_WB.loadFault || delayedLoadError
 
   // Always ready for bus replies
-  io.dBus.r.ready := Bool(true)
-  io.dBus.b.ready := Bool(true)
+  gbxRouter.io.masters(0).grspready := Bool(true)
 
   // Always ready for mulDiv replies
   mulDiv.io.resp.ready := Bool(true)
@@ -383,12 +412,13 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   csrfile.io.retire := !isBubble_WB && !kill_WB
   csrfile.io.cause := ExceptionCause.toCause(exceptions_WB, csrfile.io.interrupt_cause)
   csrfile.io.pc := PC_WB
-  csrfile.io.badaddr := aluOut_WB // TODO (amagyar): AXI4 store error address
+  csrfile.io.badaddr := Mux(busErrCause, busErrAddr, aluOut_WB)
   csrfile.io.fcsr_flags.valid := Bool(false)
-  csrfile.io.interrupts.meip := io.eip
-  csrfile.io.interrupts.mtip := Bool(false) // TODO (amagyar): support timer interrupt
-  csrfile.io.interrupts.msip := Bool(false) // TODO (amagyar): support software interrupt
+  csrfile.io.interrupts.meip := intController.io.eip
+  csrfile.io.interrupts.mtip := Bool(false)
+  csrfile.io.interrupts.msip := Bool(false)
   csrfile.io.interrupts.lip := UInt(0).asTypeOf(csrfile.io.interrupts.lip)
+
   csrfile.io.rocc_interrupt := UInt(0)
 
   breakpoints.io.status := csrfile.io.status
@@ -396,7 +426,7 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
 
   val loadExtender = Module(new LoadExtender)
   loadExtender.io.offset := memAddrOffset_WB
-  loadExtender.io.in := io.dBus.r.bits.data
+  loadExtender.io.in := gbxRouter.io.masters(0).grspdata
   loadExtender.io.memType := memType_WB
 
   val regWriteData_WB = Wire(UInt(width = xBitwidth))
@@ -436,11 +466,9 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
    * HAZARD AND REDIRECT LOGIC *
    *****************************/
 
-  val readReqWait_EX = io.dBus.ar.valid && !io.dBus.ar.ready
-  val writeReqWait_EX = (io.dBus.aw.valid && !io.dBus.aw.ready) || (io.dBus.w.valid && !io.dBus.w.ready)
-  busReqWait_EX := readReqWait_EX || writeReqWait_EX
+  busReqWait_EX := !isBubble_EX && gbxRouter.io.masters(0).greqvalid && !gbxRouter.io.masters(0).greqready
   mulDivReqWait_EX := !isBubble_EX && mulDiv.io.req.valid && !mulDiv.io.req.ready
-  busRespWait_WB := !isBubble_WB && memEn_WB && !isStore_WB && !io.dBus.r.valid
+  busRespWait_WB := !isBubble_WB && memEn_WB && !gbxRouter.io.masters(0).grspvalid && !isStore_WB
   mulDivRespWait_WB := !isBubble_WB && mulDiv_WB && !mulDiv.io.resp.valid
 
   wait_IF := Bool(false)
@@ -548,63 +576,20 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
     exceptions_IF.interrupt := Bool(true)
   }
 
+  // Add stepper to always single step core
+  // val stepper = Module(new DebugStepper)
+  // debug.io.dmi <> stepper.io.dmi
+
   debug.io.dmi <> io.dmi
-
- /********
-  * RVFI *
-  ********/
-
-  // pipeline some otherwise unnecessary signals to WB stage
-  val rvfi_rs1Addr_WB = RegEnable(rs1Addr_EX, !stall_WB)
-  val rvfi_rs1Data_WB = RegEnable(rs1DataBypassed_EX, !stall_WB)
-  val rvfi_rs2Addr_WB = RegEnable(rs2Addr_EX, !stall_WB)
-  val rvfi_rs2Data_WB = RegEnable(rs2DataBypassed_EX, !stall_WB)
-  val rvfi_nextPC_WB_from_EX = RegEnable(targetPC_EX, !stall_WB)
-  val rvfi_store_data_WB = RegEnable(wdata_EX, !stall_WB)
-  val rvfi_retire = csrfile.io.retire === UInt(1)
-  val rvfi_order = Reg(init = UInt(0, 64.W))
-  when (rvfi_retire) {
-    rvfi_order := rvfi_order + UInt(1)
+  gbxRouter.io.masters(1) <> debug.io.bus
+  // System bus access
+  val hostBusOutstanding = Reg(init = Bool(false))
+  when (debug.io.bus.greqvalid && !debug.io.bus.greqwrite) {
+    hostBusOutstanding := Bool(true)
+  } .elsewhen (gbxRouter.io.masters(1).grspvalid && !gbxRouter.io.masters(1).grspwerr) {
+    hostBusOutstanding := Bool(false)
   }
 
-  val rvfi_next_starts_handler = Reg(init = Bool(false))
-  when (exception_WB) {
-    rvfi_next_starts_handler := Bool(true)
-  } .elsewhen (rvfi_retire) {
-    rvfi_next_starts_handler := Bool(false)
-  }
-
-  val rvfi_mem_size_mask = Wire(UInt())
-  when (memEn_WB) {
-    when (memType_WB === MT_B || memType_WB === MT_BU) {
-      rvfi_mem_size_mask := UInt(1)
-    } .elsewhen (memType_WB === MT_H || memType_WB === MT_HU) {
-      rvfi_mem_size_mask := UInt(3)
-    } .otherwise {
-      rvfi_mem_size_mask := UInt(15)
-    }
-  } .otherwise {
-    rvfi_mem_size_mask := UInt(0)
-  }
-
-  io.rvfi.valid := rvfi_retire
-  io.rvfi.order := rvfi_order
-  io.rvfi.insn := inst_WB
-  io.rvfi.trap := exception_WB && (exceptions_WB.illegalInstruction || exceptions_WB.loadMisaligned || exceptions_WB.storeMisaligned)
-  io.rvfi.halt := Bool(false) // TODO (amagyar): clarify halt meaning
-  io.rvfi.intr := rvfi_next_starts_handler
-  io.rvfi.rs1_addr := rvfi_rs1Addr_WB
-  io.rvfi.rs1_rdata := rvfi_rs1Data_WB
-  io.rvfi.rs2_addr := rvfi_rs2Addr_WB
-  io.rvfi.rs2_rdata := rvfi_rs2Data_WB
-  io.rvfi.rd_addr := Mux((writeRegMasked_WB || debug.io.gprwrite), regfileWriteAddr, UInt(0))
-  io.rvfi.rd_wdata := Mux((writeRegMasked_WB || debug.io.gprwrite), regfileWriteData, UInt(0))
-  io.rvfi.pc_rdata := PC_WB
-  io.rvfi.pc_wdata := Mux(exception_WB || csrfile.io.eret || io.nmi, nextPC, rvfi_nextPC_WB_from_EX)
-  io.rvfi.mem_addr := aluOut_WB
-  io.rvfi.mem_rmask := Mux(memEn_WB && !isStore_WB, rvfi_mem_size_mask, UInt(0))
-  io.rvfi.mem_rdata := Mux(memEn_WB && !isStore_WB, regfileWriteData, UInt(0))
-  io.rvfi.mem_wmask := Mux(memEn_WB && isStore_WB, rvfi_mem_size_mask, UInt(0))
-  io.rvfi.mem_wdata := Mux(memEn_WB && isStore_WB, rvfi_store_data_WB, UInt(0))
+  gbxRouter.io.masterSelect := Mux(csrfile.io.status.debug || hostBusOutstanding, UInt(1), UInt(0))
 
 }

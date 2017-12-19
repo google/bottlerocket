@@ -19,7 +19,8 @@ package bottlerocket
 import chisel3._
 import chisel3.core.withClock
 import chisel3.util.{Decoupled,Valid,Cat}
-import freechips.rocketchip.amba.axi4.{AXI4Parameters}
+import freechips.rocketchip._
+import rocket._
 import Params._
 
 class FrontendReq extends Bundle {
@@ -36,13 +37,13 @@ class FrontendResp extends Bundle {
 }
 
 class FrontendBuffer(options: BROptions) extends Module {
-
   val io = IO(new Bundle{
+    val gclk = Input(Clock())
     val outstanding = Output(Bool())
     val sleeping = Input(Bool())
     val req = new FrontendReq
     val resp = Decoupled(new FrontendResp)
-    val bus = AXI4LiteBundle(axiParams)
+    val bus = new GBX
   })
 
   def wordAddress(x: UInt) = x & ~UInt(3, width = xBitwidth)
@@ -50,13 +51,13 @@ class FrontendBuffer(options: BROptions) extends Module {
   def isWordAligned(a: UInt) = a(1,0) === UInt(0)
   def min(a: UInt, b: UInt) = Mux(a < b, a, b)
 
-  // Hold reqvalid low during sleep
-  val reqvalid_ungated = Wire(Bool())
-  io.bus.ar.valid := reqvalid_ungated && !io.sleeping
+  // Hold GBX greqvalid low during sleep
+  val greqvalid_ungated = Wire(Bool())
+  io.bus.greqvalid := greqvalid_ungated && !io.sleeping
 
-  // These two registers track issued bus requests -> must be gated with bus clock, if different
-  val n_pending = Reg(UInt(3.W), init = UInt(0))
-  val last_req_addr = Reg(UInt(xBitwidth))
+  // These two registers track issued GBX requests -> must be gated with gclk
+  val n_pending = withClock(io.gclk) { Reg(UInt(3.W), init = UInt(0)) }
+  val last_req_addr = withClock(io.gclk) { Reg(UInt(xBitwidth)) }
   io.outstanding := n_pending =/= UInt(0)
 
   val n_to_drop = Reg(UInt(3.W), init = UInt(0))
@@ -72,31 +73,30 @@ class FrontendBuffer(options: BROptions) extends Module {
 
   val clear_buffer = Wire(Bool())
   val drop_outstanding = Wire(Bool())
-  val expected_bus_fetch_valid = io.bus.r.valid && n_to_drop === UInt(0)
+  val expected_bus_fetch_valid = io.bus.grspvalid && n_to_drop === UInt(0)
 
   val head_halfword = buf_vec(buf_head)
   val next_halfword = buf_vec(buf_head + UInt(1))
   val jumped_to_halfword_aligned = Reg(init = Bool(false))
-  val n_useful_bus_bytes = Mux(jumped_to_halfword_aligned, UInt(2), UInt(4))
-  val bus_first_halfword = Mux(jumped_to_halfword_aligned, io.bus.r.bits.data(31,16), io.bus.r.bits.data(15,0))
-  val bus_second_halfword = Mux(jumped_to_halfword_aligned, io.bus.r.bits.data(15,0), io.bus.r.bits.data(31,16))
+  val n_useful_gbx_bytes = Mux(jumped_to_halfword_aligned, UInt(2), UInt(4))
+  val bus_first_halfword = Mux(jumped_to_halfword_aligned, io.bus.grspdata(31,16), io.bus.grspdata(15,0))
+  val bus_second_halfword = Mux(jumped_to_halfword_aligned, io.bus.grspdata(15,0), io.bus.grspdata(31,16))
+
+  val req_prv = Wire(UInt())
+  val prev_req_prv = Reg(init = UInt(PRV.M))
 
   val hold_reset = Reg(init = Bool(true))
   hold_reset := Bool(false)
 
-  // constant AXI4Lite fields
-  io.bus.ar.bits.cache := AXI4Parameters.CACHE_BUFFERABLE
-  io.bus.r.ready := Bool(true)
-
-  // zero write channel signals
-  io.bus.aw.valid := false.B
-  io.bus.aw.bits.addr := 0.U
-  io.bus.aw.bits.cache := 0.U
-  io.bus.aw.bits.prot := 0.U
-  io.bus.w.valid := false.B
-  io.bus.w.bits.data := 0.U
-  io.bus.w.bits.strb := 0.U
-  io.bus.b.ready := true.B
+  // unused GBX fields
+  io.bus.grspready := Bool(true)
+  io.bus.greqwrite := Bool(false)
+  io.bus.greqlen := UInt(0)
+  io.bus.greqdvalid := Bool(false)
+  io.bus.greqdata := UInt(0)
+  io.bus.greqsize := UInt(2)
+  io.bus.greqdlast := Bool(false)
+  io.bus.grequser := UInt(0)
 
   // Sometimes redirects go to halfword-aligned addresses
   when (io.req.redirect) {
@@ -106,34 +106,35 @@ class FrontendBuffer(options: BROptions) extends Module {
   }
 
   // Record last requested address
-  when (io.bus.ar.ready && io.bus.ar.valid) {
-    last_req_addr := io.bus.ar.bits.addr
+  when (io.bus.greqready && io.bus.greqvalid) {
+    last_req_addr := io.bus.greqaddr
   }
 
   // Privilege modes
-  val bus_prot = Reg(init = AXI4Parameters.PROT_PRIVILEDGED)
+  req_prv := prev_req_prv
   when (io.req.enter_U_mode) {
-    bus_prot := AXI4Parameters.PROT_INSTRUCTION
+    req_prv := UInt(PRV.U)
   } .elsewhen (io.req.exit_U_mode) {
-    bus_prot := AXI4Parameters.PROT_PRIVILEDGED
+    req_prv := UInt(PRV.M)
   }
-  io.bus.ar.bits.prot := bus_prot
+  prev_req_prv := req_prv
+  io.bus.greqid := Mux(req_prv === UInt(PRV.M), UInt(2), UInt(0))
 
   // two main behaviors: branch/jump/exception/etc or sequential code
   // ALL privilege level changes are also redirects, so this handles flushing
   when (hold_reset) {
-    reqvalid_ungated := Bool(false)
-    io.bus.ar.bits.addr := wordAddress(io.req.pc)
+    greqvalid_ungated := Bool(false)
+    io.bus.greqaddr := wordAddress(io.req.pc)
     clear_buffer := Bool(false)
     drop_outstanding := Bool(false)
   } .elsewhen (io.req.redirect) {
-    reqvalid_ungated := Bool(true)
-    io.bus.ar.bits.addr := wordAddress(io.req.pc)
+    greqvalid_ungated := Bool(true)
+    io.bus.greqaddr := wordAddress(io.req.pc)
     clear_buffer := Bool(true)
     drop_outstanding := Bool(true)
   } .otherwise {
-    reqvalid_ungated := !buffer_full
-    io.bus.ar.bits.addr := Mux(true_pending > UInt(0), last_req_addr + UInt(4), wordAddress(buf_base + buf_size))
+    greqvalid_ungated := !buffer_full
+    io.bus.greqaddr := Mux(true_pending > UInt(0), last_req_addr + UInt(4), wordAddress(buf_base + buf_size))
     clear_buffer := Bool(false)
     drop_outstanding := Bool(false)
   }
@@ -141,12 +142,12 @@ class FrontendBuffer(options: BROptions) extends Module {
   // outstanding / to-drop transaction counters
   // Never more than one USEFUL outstanding transaction!
   val n_pending_next = n_pending +
-    Mux(io.bus.ar.ready && io.bus.ar.valid, UInt(1), UInt(0)) -
-    Mux(io.bus.r.valid, UInt(1), UInt(0))
+    Mux(io.bus.greqready && io.bus.greqvalid, UInt(1), UInt(0)) -
+    Mux(io.bus.grspvalid, UInt(1), UInt(0))
   n_pending := n_pending_next
   when (drop_outstanding) {
-    n_to_drop := n_pending - Mux(io.bus.r.valid, UInt(1), UInt(0))
-  } .elsewhen (n_to_drop =/= UInt(0) && io.bus.r.valid) {
+    n_to_drop := n_pending - Mux(io.bus.grspvalid, UInt(1), UInt(0))
+  } .elsewhen (n_to_drop =/= UInt(0) && io.bus.grspvalid) {
     n_to_drop := n_to_drop - UInt(1)
   }
 
@@ -159,7 +160,7 @@ class FrontendBuffer(options: BROptions) extends Module {
   } .otherwise {
     val resp_inst_size = Mux(isRVC(io.resp.bits.inst), UInt(2), UInt(4))
     val base_diff_bytes = Mux(io.resp.fire, resp_inst_size, UInt(0))
-    val end_diff_bytes = Mux(expected_bus_fetch_valid, n_useful_bus_bytes, UInt(0))
+    val end_diff_bytes = Mux(expected_bus_fetch_valid, n_useful_gbx_bytes, UInt(0))
     val head_diff = base_diff_bytes >> 1
     val tail_diff = end_diff_bytes >> 1
     buf_head := buf_head + head_diff
@@ -168,7 +169,8 @@ class FrontendBuffer(options: BROptions) extends Module {
     buf_size := min(buf_size + end_diff_bytes - base_diff_bytes, UInt(8))
   }
 
-  val busHasError = io.bus.r.valid && (io.bus.r.bits.resp === AXI4Parameters.RESP_SLVERR || io.bus.r.bits.resp === AXI4Parameters.RESP_DECERR)
+  val reply_error = expected_bus_fetch_valid && io.bus.grsprerr
+
   // buffer refill writes:
   // All replies are already filtered with 'expected_bus_fetch_valid'
   // Therefore, when bus reply appears, take it!
@@ -177,8 +179,8 @@ class FrontendBuffer(options: BROptions) extends Module {
     // Second half is only undesired after a branch
     // In this case, all buffer contents are garbage, so writing wastefully is fine
     buf_vec(buf_tail + UInt(1)) := bus_second_halfword
-    err_vec(buf_tail) := busHasError
-    err_vec(buf_tail + UInt(1)) := busHasError
+    err_vec(buf_tail) := reply_error
+    err_vec(buf_tail + UInt(1)) := reply_error
   }
 
   // reply management
@@ -186,11 +188,11 @@ class FrontendBuffer(options: BROptions) extends Module {
   when (buf_size === UInt(0)) {
     io.resp.valid := expected_bus_fetch_valid && (!jumped_to_halfword_aligned || isRVC(bus_first_halfword))
     io.resp.bits.inst := Cat(bus_second_halfword, bus_first_halfword)
-    io.resp.bits.error := busHasError
+    io.resp.bits.error := reply_error
   } .elsewhen (buf_size === UInt(2) && !isRVC(buf_vec(buf_head))) {
     io.resp.valid := expected_bus_fetch_valid
     io.resp.bits.inst := Cat(bus_first_halfword, head_halfword)
-    io.resp.bits.error := busHasError || err_vec(buf_head)
+    io.resp.bits.error := reply_error || err_vec(buf_head)
   } .otherwise {
     io.resp.valid := Bool(true)
     io.resp.bits.inst := Cat(next_halfword, head_halfword)

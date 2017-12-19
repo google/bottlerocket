@@ -36,6 +36,7 @@ class DebugModuleFSM()(implicit p: config.Parameters) extends Module {
     val csrrdata = Input(UInt(width = xBitwidth))
     val regwdata = Output(UInt(width = xBitwidth))
     val dmi = Flipped(new DMIIO()(p))
+    val bus = new GBX
   })
 
   val reqQueue = Module(new Queue(new DMIReq(p(DebugModuleParams).nDMIAddrSize), 2))
@@ -90,9 +91,19 @@ class DebugModuleFSM()(implicit p: config.Parameters) extends Module {
   // abstract cmd
   val abstractCmd = Reg(init = zPad(32))
 
+  // submodule to manage system bus access
+  val busFSM = Module(new DebugBusAccessFSM)
+  busFSM.io.dmiReadActive := dmiReadActive
+  busFSM.io.dmiWriteActive := dmiWriteActive
+  busFSM.io.dmiReqAddr := dmiReqAddr
+  busFSM.io.dmiReqData := dmiReqData
+  io.bus <> busFSM.io.bus
+
   // read mapping
   dmiRespType := DMIConsts.dmi_RESP_SUCCESS
-  when (dmiReqAddr === "h04".U) {
+  when (busFSM.io.dmiRespValid) {
+    dmiRespData := busFSM.io.dmiRespData
+  } .elsewhen (dmiReqAddr === "h04".U) {
     dmiRespData := data0
   } .elsewhen (dmiReqAddr === "h10".U) {
     dmiRespData := Cat(haltReq, resumeReq, zPad(29), dmActive)

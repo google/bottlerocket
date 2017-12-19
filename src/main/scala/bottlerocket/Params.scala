@@ -22,7 +22,6 @@ import freechips.rocketchip._
 import config.{Config, Field}
 import system.TinyConfig
 import rocket.{RocketCoreParams, MulDivParams, DCacheParams, ICacheParams}
-import amba.axi4.{AXI4BundleParameters}
 import tile._
 import coreplex._
 import devices.debug.{DebugModuleParams, DefaultDebugModuleParams}
@@ -40,7 +39,6 @@ package object Params {
   val xByteOffsetBitwidth = 2.W
   val instBitwidth = 32.W
   val nRegisters = 32
-  val axiParams = new AXI4BundleParameters(32, 32, 16, 16)
 }
 
 case object NMI_VEC extends Field[BigInt]

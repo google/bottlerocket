@@ -15,7 +15,7 @@
 // Unit-level testbench for the BottleRocket core with RISC-V isa tests
 
 `include "BottleRocketCore.v"
-`include "MockAXI4LiteSRAM.v"
+`include "GBXSRAM.v"
 
 `define MAXCYCLES 100000
 `define TOHOSTADDR 'h00006000
@@ -27,109 +27,73 @@ module BottleRocketCoreTB(
    reg           clk;
    reg           reset;
 
-   wire          imem_awvalid;
-   wire          imem_awready;
-   wire [31:0]   imem_awaddr;
-   wire [2:0]    imem_awprot;
-   wire [3:0]    imem_awcache;
-   wire          imem_wvalid;
-   wire          imem_wready;
-   wire [31:0]   imem_wdata;
-   wire [3:0]    imem_wstrb;
-   wire          imem_bvalid;
-   wire          imem_bready;
-   wire [1:0]    imem_bresp;
-   wire          imem_arvalid;
-   wire          imem_arready;
-   wire [31:0]   imem_araddr;
-   wire [2:0]    imem_arprot;
-   wire [3:0]    imem_arcache;
-   wire          imem_rvalid;
-   wire          imem_rready;
-   wire [1:0]    imem_rresp;
-   wire [31:0]   imem_rdata;
+   wire          iBus_greqvalid;
+   wire          iBus_greqwrite;
+   wire [31:0]   iBus_greqaddr;
+   wire [3:0]    iBus_greqlen;
+   wire [15:0]   iBus_greqid;
+   wire          iBus_greqdvalid;
+   wire [31:0]   iBus_greqdata;
+   wire [1:0]    iBus_greqsize;
+   wire          iBus_greqdlast;
+   wire [15:0]   iBus_grequser;
+   wire          iBus_greqready;
+   wire          iBus_grspvalid;
+   wire [31:0]   iBus_grspdata;
+   wire          iBus_grspwerr;
+   wire          iBus_grsprerr;
+   wire [15:0]   iBus_grspid;
+   wire          iBus_grsplast;
+   wire [15:0]   iBus_grspuser;
+   wire          iBus_grspready;
 
+   wire          dBus_greqvalid;
+   wire          dBus_greqwrite;
+   wire [31:0]   dBus_greqaddr;
+   wire [3:0]    dBus_greqlen;
+   wire [15:0]   dBus_greqid;
+   wire          dBus_greqdvalid;
+   wire [31:0]   dBus_greqdata;
+   wire [1:0]    dBus_greqsize;
+   wire          dBus_greqdlast;
+   wire [15:0]   dBus_grequser;
+   wire          dBus_greqready;
+   wire          dBus_grspvalid;
+   wire [31:0]   dBus_grspdata;
+   wire          dBus_grspwerr;
+   wire          dBus_grsprerr;
+   wire [15:0]   dBus_grspid;
+   wire          dBus_grsplast;
+   wire [15:0]   dBus_grspuser;
+   wire          dBus_grspready;
 
-   wire          dmem_awvalid;
-   wire          dmem_awready;
-   wire [31:0]   dmem_awaddr;
-   wire [2:0]    dmem_awprot;
-   wire [3:0]    dmem_awcache;
-   wire          dmem_wvalid;
-   wire          dmem_wready;
-   wire [31:0]   dmem_wdata;
-   wire [3:0]    dmem_wstrb;
-   wire          dmem_bvalid;
-   wire          dmem_bready;
-   wire [1:0]    dmem_bresp;
-   wire          dmem_arvalid;
-   wire          dmem_arready;
-   wire [31:0]   dmem_araddr;
-   wire [2:0]    dmem_arprot;
-   wire [3:0]    dmem_arcache;
-   wire          dmem_rvalid;
-   wire          dmem_rready;
-   wire [1:0]    dmem_rresp;
-   wire [31:0]   dmem_rdata;
-
-   MockAXI4LiteSRAM imem(
-		         .aclk(clk),
-		         .aresetn(~reset),
-                         .awvalid(imem_awvalid),
-                         .awready(imem_awready),
-                         .awaddr(imem_awaddr),
-                         .awprot(imem_awprot),
-                         .awcache(imem_awcache),
-                         .wvalid(imem_wvalid),
-                         .wready(imem_wready),
-                         .wdata(imem_wdata),
-                         .wstrb(imem_wstrb),
-                         .bvalid(imem_bvalid),
-                         .bready(imem_bready),
-                         .bresp(imem_bresp),
-                         .arvalid(imem_arvalid),
-                         .arready(imem_arready),
-                         .araddr(imem_araddr),
-                         .arprot(imem_arprot),
-                         .arcache(imem_arcache),
-                         .rvalid(imem_rvalid),
-                         .rready(imem_rready),
-                         .rresp(imem_rresp),
-                         .rdata(imem_rdata)
-		         );
-
-   MockAXI4LiteSRAM dmem(
-		         .aclk(clk),
-		         .aresetn(~reset),
-                         .awvalid(dmem_awvalid),
-                         .awready(dmem_awready),
-                         .awaddr(dmem_awaddr),
-                         .awprot(dmem_awprot),
-                         .awcache(dmem_awcache),
-                         .wvalid(dmem_wvalid),
-                         .wready(dmem_wready),
-                         .wdata(dmem_wdata),
-                         .wstrb(dmem_wstrb),
-                         .bvalid(dmem_bvalid),
-                         .bready(dmem_bready),
-                         .bresp(dmem_bresp),
-                         .arvalid(dmem_arvalid),
-                         .arready(dmem_arready),
-                         .araddr(dmem_araddr),
-                         .arprot(dmem_arprot),
-                         .arcache(dmem_arcache),
-                         .rvalid(dmem_rvalid),
-                         .rready(dmem_rready),
-                         .rresp(dmem_rresp),
-                         .rdata(dmem_rdata)
-		         );
+   wire          sBus_greqvalid;
+   wire          sBus_greqwrite;
+   wire [31:0]   sBus_greqaddr;
+   wire [3:0]    sBus_greqlen;
+   wire [15:0]   sBus_greqid;
+   wire          sBus_greqdvalid;
+   wire [31:0]   sBus_greqdata;
+   wire [1:0]    sBus_greqsize;
+   wire          sBus_greqdlast;
+   wire [15:0]   sBus_grequser;
+   wire          sBus_greqready;
+   wire          sBus_grspvalid;
+   wire [31:0]   sBus_grspdata;
+   wire          sBus_grspwerr;
+   wire          sBus_grsprerr;
+   wire [15:0]   sBus_grspid;
+   wire          sBus_grsplast;
+   wire [15:0]   sBus_grspuser;
+   wire          sBus_grspready;
 
    BottleRocketCore core(
                          .clock(clk),
                          .reset(reset),
                          .io_constclk(clk),
+                         .io_iBus_gclk(clk),
                          .io_nmi(1'b0),
-                         .io_eip(1'b0),
+                         .io_interruptLines(240'b0),
                          .io_dmi_req_ready(),
                          .io_dmi_req_valid(1'b0),
                          .io_dmi_req_bits_addr(7'b0),
@@ -144,50 +108,155 @@ module BottleRocketCoreTB(
                          .io_traceRetire(),
                          .io_traceInterrupt(),
                          .io_traceEret(),
-                         .io_iBus_aw_valid(imem_awvalid),
-                         .io_iBus_aw_ready(imem_awready),
-                         .io_iBus_aw_bits_addr(imem_awaddr),
-                         .io_iBus_aw_bits_prot(imem_awprot),
-                         .io_iBus_aw_bits_cache(imem_awcache),
-                         .io_iBus_w_valid(imem_wvalid),
-                         .io_iBus_w_ready(imem_wready),
-                         .io_iBus_w_bits_data(imem_wdata),
-                         .io_iBus_w_bits_strb(imem_wstrb),
-                         .io_iBus_b_valid(imem_bvalid),
-                         .io_iBus_b_ready(imem_bready),
-                         .io_iBus_b_bits_resp(imem_bresp),
-                         .io_iBus_ar_valid(imem_arvalid),
-                         .io_iBus_ar_ready(imem_arready),
-                         .io_iBus_ar_bits_addr(imem_araddr),
-                         .io_iBus_ar_bits_prot(imem_arprot),
-                         .io_iBus_ar_bits_cache(imem_arcache),
-                         .io_iBus_r_valid(imem_rvalid),
-                         .io_iBus_r_ready(imem_rready),
-                         .io_iBus_r_bits_resp(imem_rresp),
-                         .io_iBus_r_bits_data(imem_rdata),
-                         .io_dBus_aw_valid(dmem_awvalid),
-                         .io_dBus_aw_ready(dmem_awready),
-                         .io_dBus_aw_bits_addr(dmem_awaddr),
-                         .io_dBus_aw_bits_prot(dmem_awprot),
-                         .io_dBus_aw_bits_cache(dmem_awcache),
-                         .io_dBus_w_valid(dmem_wvalid),
-                         .io_dBus_w_ready(dmem_wready),
-                         .io_dBus_w_bits_data(dmem_wdata),
-                         .io_dBus_w_bits_strb(dmem_wstrb),
-                         .io_dBus_b_valid(dmem_bvalid),
-                         .io_dBus_b_ready(dmem_bready),
-                         .io_dBus_b_bits_resp(dmem_bresp),
-                         .io_dBus_ar_valid(dmem_arvalid),
-                         .io_dBus_ar_ready(dmem_arready),
-                         .io_dBus_ar_bits_addr(dmem_araddr),
-                         .io_dBus_ar_bits_prot(dmem_arprot),
-                         .io_dBus_ar_bits_cache(dmem_arcache),
-                         .io_dBus_r_valid(dmem_rvalid),
-                         .io_dBus_r_ready(dmem_rready),
-                         .io_dBus_r_bits_resp(dmem_rresp),
-                         .io_dBus_r_bits_data(dmem_rdata)
+                         .io_iBus_greqvalid(iBus_greqvalid),
+                         .io_iBus_greqwrite(iBus_greqwrite),
+                         .io_iBus_greqaddr(iBus_greqaddr),
+                         .io_iBus_greqlen(iBus_greqlen),
+                         .io_iBus_greqid(iBus_greqid),
+                         .io_iBus_greqdvalid(iBus_greqdvalid),
+                         .io_iBus_greqdata(iBus_greqdata),
+                         .io_iBus_greqsize(iBus_greqsize),
+                         .io_iBus_greqdlast(iBus_greqdlast),
+                         .io_iBus_grequser(iBus_grequser),
+                         .io_iBus_greqready(iBus_greqready),
+                         .io_iBus_grspvalid(iBus_grspvalid),
+                         .io_iBus_grspdata(iBus_grspdata),
+                         .io_iBus_grspwerr(iBus_grspwerr),
+                         .io_iBus_grsprerr(iBus_grsprerr),
+                         .io_iBus_grspid(iBus_grspid),
+                         .io_iBus_grsplast(iBus_grsplast),
+                         .io_iBus_grspuser(iBus_grspuser),
+                         .io_iBus_grspready(iBus_grspready),
+                         .io_dBus_greqvalid(dBus_greqvalid),
+                         .io_dBus_greqwrite(dBus_greqwrite),
+                         .io_dBus_greqaddr(dBus_greqaddr),
+                         .io_dBus_greqlen(dBus_greqlen),
+                         .io_dBus_greqid(dBus_greqid),
+                         .io_dBus_greqdvalid(dBus_greqdvalid),
+                         .io_dBus_greqdata(dBus_greqdata),
+                         .io_dBus_greqsize(dBus_greqsize),
+                         .io_dBus_greqdlast(dBus_greqdlast),
+                         .io_dBus_grequser(dBus_grequser),
+                         .io_dBus_greqready(dBus_greqready),
+                         .io_dBus_grspvalid(dBus_grspvalid),
+                         .io_dBus_grspdata(dBus_grspdata),
+                         .io_dBus_grspwerr(dBus_grspwerr),
+                         .io_dBus_grsprerr(dBus_grsprerr),
+                         .io_dBus_grspid(dBus_grspid),
+                         .io_dBus_grsplast(dBus_grsplast),
+                         .io_dBus_grspuser(dBus_grspuser),
+                         .io_dBus_grspready(dBus_grspready),
+                         .io_sBus_greqvalid(sBus_greqvalid),
+                         .io_sBus_greqwrite(sBus_greqwrite),
+                         .io_sBus_greqaddr(sBus_greqaddr),
+                         .io_sBus_greqlen(sBus_greqlen),
+                         .io_sBus_greqid(sBus_greqid),
+                         .io_sBus_greqdvalid(sBus_greqdvalid),
+                         .io_sBus_greqdata(sBus_greqdata),
+                         .io_sBus_greqsize(sBus_greqsize),
+                         .io_sBus_greqdlast(sBus_greqdlast),
+                         .io_sBus_grequser(sBus_grequser),
+                         .io_sBus_greqready(sBus_greqready),
+                         .io_sBus_grspvalid(sBus_grspvalid),
+                         .io_sBus_grspdata(sBus_grspdata),
+                         .io_sBus_grspwerr(sBus_grspwerr),
+                         .io_sBus_grsprerr(sBus_grsprerr),
+                         .io_sBus_grspid(sBus_grspid),
+                         .io_sBus_grsplast(sBus_grsplast),
+                         .io_sBus_grspuser(sBus_grspuser),
+                         .io_sBus_grspready(sBus_grspready),
+                         .io_localBus_greqvalid(),
+                         .io_localBus_greqwrite(),
+                         .io_localBus_greqaddr(),
+                         .io_localBus_greqlen(),
+                         .io_localBus_greqid(),
+                         .io_localBus_greqdvalid(),
+                         .io_localBus_greqdata(),
+                         .io_localBus_greqsize(),
+                         .io_localBus_greqdlast(),
+                         .io_localBus_grequser(),
+                         .io_localBus_greqready(1'b0),
+                         .io_localBus_grspvalid(1'b0),
+                         .io_localBus_grspdata(32'b0),
+                         .io_localBus_grspwerr(1'b0),
+                         .io_localBus_grsprerr(1'b0),
+                         .io_localBus_grspid(16'b0),
+                         .io_localBus_grsplast(1'b0),
+                         .io_localBus_grspuser(16'b0),
+                         .io_localBus_grspready()
                          );
 
+   GBXSRAM imem(
+                .clk(clk),
+                .reset(reset),
+                .greqvalid(iBus_greqvalid),
+                .greqwrite(iBus_greqwrite),
+                .greqaddr(iBus_greqaddr),
+                .greqlen(iBus_greqlen),
+                .greqid(iBus_greqid),
+                .greqdvalid(iBus_greqdvalid),
+                .greqdata(iBus_greqdata),
+                .greqsize(iBus_greqsize),
+                .greqdlast(iBus_greqdlast),
+                .grequser(iBus_grequser),
+                .greqready(iBus_greqready),
+                .grspvalid(iBus_grspvalid),
+                .grspdata(iBus_grspdata),
+                .grspwerr(iBus_grspwerr),
+                .grsprerr(iBus_grsprerr),
+                .grspid(iBus_grspid),
+                .grsplast(iBus_grsplast),
+                .grspuser(iBus_grspuser),
+                .grspready(iBus_grspready)
+                );
+
+   GBXSRAM dmem(
+                .clk(clk),
+                .reset(reset),
+                .greqvalid(dBus_greqvalid),
+                .greqwrite(dBus_greqwrite),
+                .greqaddr(dBus_greqaddr),
+                .greqlen(dBus_greqlen),
+                .greqid(dBus_greqid),
+                .greqdvalid(dBus_greqdvalid),
+                .greqdata(dBus_greqdata),
+                .greqsize(dBus_greqsize),
+                .greqdlast(dBus_greqdlast),
+                .grequser(dBus_grequser),
+                .greqready(dBus_greqready),
+                .grspvalid(dBus_grspvalid),
+                .grspdata(dBus_grspdata),
+                .grspwerr(dBus_grspwerr),
+                .grsprerr(dBus_grsprerr),
+                .grspid(dBus_grspid),
+                .grsplast(dBus_grsplast),
+                .grspuser(dBus_grspuser),
+                .grspready(dBus_grspready)
+                );
+
+   GBXSRAM smem(
+                .clk(clk),
+                .reset(reset),
+                .greqvalid(sBus_greqvalid),
+                .greqwrite(sBus_greqwrite),
+                .greqaddr(sBus_greqaddr),
+                .greqlen(sBus_greqlen),
+                .greqid(sBus_greqid),
+                .greqdvalid(sBus_greqdvalid),
+                .greqdata(sBus_greqdata),
+                .greqsize(sBus_greqsize),
+                .greqdlast(sBus_greqdlast),
+                .grequser(sBus_grequser),
+                .greqready(sBus_greqready),
+                .grspvalid(sBus_grspvalid),
+                .grspdata(sBus_grspdata),
+                .grspwerr(sBus_grspwerr),
+                .grsprerr(sBus_grsprerr),
+                .grspid(sBus_grspid),
+                .grsplast(sBus_grsplast),
+                .grspuser(sBus_grspuser),
+                .grspready(sBus_grspready)
+                );
 
    integer       ncycles;
 
@@ -221,8 +290,8 @@ module BottleRocketCoreTB(
    end
 
    always @(posedge clk) begin
-      if (dmem_awvalid && dmem_wvalid && dmem_awaddr == `TOHOSTADDR) begin
-         if (dmem_wdata == `SUCCESSCODE) begin
+      if (dBus_greqvalid && dBus_greqwrite && dBus_greqaddr == `TOHOSTADDR) begin
+         if (dBus_greqdata == `SUCCESSCODE) begin
             $info("Success!\n");
             $shm_close;
             $finish;
