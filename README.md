@@ -86,7 +86,7 @@ the RISCV environment variable points to the RISC-V toolchain installation.
    ```bash
    $ git clone https://github.com/riscv/riscv-tools
    $ cd riscv-tools
-   $ sed ‘s/ima/imc/g’ <build-rv32ima.sh >build-rv32imc.sh
+   $ sed 's/ima/imc/g' <build-rv32ima.sh >build-rv32imc.sh
    $ chmod +x build-rv32imc.sh
    $ ./build-rv32imc.sh
    ```
