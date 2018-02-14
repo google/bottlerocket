@@ -440,7 +440,7 @@ class BottleRocketCore(options: BROptions)(implicit p: config.Parameters) extend
   val writeReqWait_EX = (io.dBus.aw.valid && !io.dBus.aw.ready) || (io.dBus.w.valid && !io.dBus.w.ready)
   busReqWait_EX := readReqWait_EX || writeReqWait_EX
   mulDivReqWait_EX := !isBubble_EX && mulDiv.io.req.valid && !mulDiv.io.req.ready
-  busRespWait_WB := !isBubble_WB && memEn_WB && !isStore_WB && !io.dBus.r.valid
+  busRespWait_WB := !isBubble_WB && memEn_WB && ((!isStore_WB && !io.dBus.r.valid) || (isStore_WB && !io.dBus.b.valid))
   mulDivRespWait_WB := !isBubble_WB && mulDiv_WB && !mulDiv.io.resp.valid
 
   wait_IF := Bool(false)
